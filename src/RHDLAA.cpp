@@ -1,4 +1,8 @@
-// RHDLAA - NVIDIA DLAA in place of gtaRenderHook's TAA. GTA SA 1.0 US, _gtaRenderHook.asi build of 2021-09-11.
+// RHDLAA - NVIDIA DLAA in place of gtaRenderHook's TAA. GTA SA 1.0 US.
+//
+// With a RenderHook that exports RHSetTemporalAAHandler (RenderHookAPI.h) the plugin registers a handler and needs
+// no patching; RenderHook passes the frame's textures, jitter and matrices. For the 2021-09-11 release, which has no
+// such export, it hooks that binary at fixed offsets as described below.
 //
 // The DLSS runtime is 64-bit only, so it runs in RHDLAA64.exe (scripts\RHDLAA\), started by this plugin. Each frame:
 //  - RenderHook's TAA step (call at RH+0xDBB32 to CTemporalAA::Render, before tonemapping) is replaced: the HDR
@@ -20,6 +24,7 @@
 #include <cstring>
 #include <share.h>
 #include "Shared.h"
+#include "RenderHookAPI.h"
 #include "MotionVectorsVS.h"
 #include "MotionVectorsPS.h"
 
@@ -404,10 +409,9 @@ bool CameraJumped()
     return dx * dx + dy * dy + dz * dz > g_resetDistance * g_resetDistance;
 }
 
-// true = output written
-bool RunDlaa(void* input, void* output, void* gbuffer1)
+// true = output written. in/out/gb1 belong to the caller.
+bool RunDlaa(ID3D11DeviceContext* rhContext, ID3D11Texture2D* in, ID3D11Texture2D* out, ID3D11ShaderResourceView* gb1)
 {
-    ID3D11DeviceContext* rhContext = RhContext();
     if (!rhContext || !g_cam.valid) return false;
     if (!g_device && !InitDevice(rhContext)) return false;
     if (!g_helperStarted && !StartHelper()) return false;
@@ -421,9 +425,6 @@ bool RunDlaa(void* input, void* output, void* gbuffer1)
         return false;
     }
 
-    ID3D11Texture2D* in = RasterTexture(input);
-    ID3D11Texture2D* out = RasterTexture(output);
-    ID3D11ShaderResourceView* gb1 = RasterSrv(gbuffer1);
     bool ok = false;
     if (in && out && gb1) {
         D3D11_TEXTURE2D_DESC inDesc, outDesc;
@@ -463,6 +464,15 @@ bool RunDlaa(void* input, void* output, void* gbuffer1)
             }
         }
     }
+    return ok;
+}
+
+// 2021 release: RenderHook's rasters
+bool RunDlaaOnRasters(void* input, void* output, void* gbuffer1)
+{
+    ID3D11Texture2D* in = RasterTexture(input);
+    ID3D11Texture2D* out = RasterTexture(output);
+    bool ok = in && out && RunDlaa(RhContext(), in, out, RasterSrv(gbuffer1));
     Release(in);
     Release(out);
     return ok;
@@ -481,7 +491,7 @@ void CallTaa(void* input, void* output, void* gbuffer1, void* gbuffer2)
     }
 }
 
-void __cdecl TaaHook(void* input, void* output, void* gbuffer1, void* gbuffer2)
+void CheckToggleKey()
 {
     if (g_toggleKey) {
         bool down = (GetAsyncKeyState(g_toggleKey) & 0x8000) != 0;
@@ -492,11 +502,33 @@ void __cdecl TaaHook(void* input, void* output, void* gbuffer1, void* gbuffer2)
         }
         g_keyDown = down;
     }
-    bool done = g_enabled && g_active && !g_broken && RunDlaa(input, output, gbuffer1);
+}
+
+void __cdecl TaaHook(void* input, void* output, void* gbuffer1, void* gbuffer2)
+{
+    CheckToggleKey();
+    bool done = g_enabled && g_active && !g_broken && RunDlaaOnRasters(input, output, gbuffer1);
     g_jitterActive = done;
     if (!done) CallTaa(input, output, gbuffer1, gbuffer2);
     g_prevCam = g_cam;
     g_cam.valid = false;
+}
+
+// RenderHook with RHSetTemporalAAHandler: called in place of its TAA; false = RenderHook runs its own TAA
+bool __cdecl TemporalAAHandler(const RHTemporalAAFrame* frame)
+{
+    if (!frame || frame->size < sizeof(RHTemporalAAFrame)) return false;
+    CheckToggleKey();
+    memcpy(g_cam.view.m, frame->view, sizeof(Mat));
+    memcpy(g_cam.proj.m, frame->projection, sizeof(Mat));
+    g_cam.jitteredProj = g_cam.proj;
+    g_cam.jitteredProj.m[8] += frame->jitterX;   // RenderHook adds the jitter to _31/_32
+    g_cam.jitteredProj.m[9] += frame->jitterY;
+    g_cam.valid = true;
+    bool done = g_enabled && g_active && !g_broken && RunDlaa(frame->context, frame->input, frame->output, frame->gbuffer1);
+    g_prevCam = g_cam;
+    g_cam.valid = false;
+    return done;
 }
 
 __declspec(naked) void TaaThunk()
@@ -527,6 +559,13 @@ void Install()
 {
     g_rh = reinterpret_cast<uint8_t*>(GetModuleHandleA("_gtaRenderHook.asi"));
     if (!g_rh) { Log("_gtaRenderHook.asi not loaded"); return; }
+    typedef void(__cdecl* SetHandlerFn)(RHTemporalAAHandler);
+    if (auto setHandler = reinterpret_cast<SetHandlerFn>(GetProcAddress(reinterpret_cast<HMODULE>(g_rh), "RHSetTemporalAAHandler"))) {
+        setHandler(&TemporalAAHandler);
+        Log("registered with RenderHook's temporal AA handler API; DLAA %s, preset %d, toggle key 0x%X",
+            g_enabled ? "enabled" : "disabled", g_preset, g_toggleKey);
+        return;
+    }
     g_taaRender = g_rh + kTaaRender;
     g_jitterFn = g_rh + kJitterFn;
     // check both sites first, so an unknown build is left untouched
@@ -559,7 +598,7 @@ BOOL WINAPI DllMain(HMODULE mod, DWORD reason, LPVOID)
         GetModuleFileNameA(mod, path, MAX_PATH);
         if (char* dot = strrchr(path, '.')) strcpy_s(dot, path + MAX_PATH - dot, ".log");
         g_log = _fsopen(path, "w", _SH_DENYNO);
-        Log("RHDLAA 1.0");
+        Log("RHDLAA 1.1");
         if (char* dot = strrchr(path, '.')) strcpy_s(dot, path + MAX_PATH - dot, ".ini");
         g_enabled = GetPrivateProfileIntA("DLAA", "Enabled", 1, path) != 0;
         g_preset = GetPrivateProfileIntA("DLAA", "Preset", 0, path);
