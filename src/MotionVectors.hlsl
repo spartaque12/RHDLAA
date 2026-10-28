@@ -1,6 +1,6 @@
-// RHDLAA: camera motion vectors and hardware-style depth for DLAA, from RenderHook's G-buffer (view depth in
-// gbuffer 1 .zw, see GBuffer.hlsl EncodeFloatRG). Objects that move on their own get no motion of their own, like
-// with RenderHook's TAA.
+// RHDLAA: motion vectors and hardware-style depth for DLAA, from RenderHook's G-buffer (view depth in gbuffer 1
+// .zw, see GBuffer.hlsl EncodeFloatRG). Camera motion from depth everywhere; where RenderHook wrote object motion
+// vectors (vehicles, peds; RenderHook builds with RHTemporalAAFrame::objectMotion) those are used instead.
 
 // RenderHook's RenderStateBuffer, only up to fFarClip
 cbuffer RenderStateBuffer : register(b0)
@@ -18,9 +18,12 @@ cbuffer Reprojection : register(b1)
     row_major float4x4 mPrevViewProj;   // world -> clip, previous frame, without jitter
     float4 vProj;                       // jittered projection: _11, _22, _31, _32
     float2 vScreen;
+    float fObjectMotion;                // 1: txObjectMotion is bound
 }
 
 Texture2D txNormalDepth : register(t0);
+// RenderHook's object motion: xy pixels current -> previous (no jitter), z = 1 where an object wrote it
+Texture2D txObjectMotion : register(t1);
 
 void VS(uint id : SV_VertexID, out float4 pos : SV_Position)
 {
@@ -62,5 +65,10 @@ Output PS(float4 pos : SV_Position)
         o.depth = saturate(cur.z / cur.w);
     }
     o.motion = (prev.w > 0.0 && cur.w > 0.0) ? ClipToPixel(prev) - ClipToPixel(cur) : 0.0;
+    if (fObjectMotion > 0.5) {
+        float4 own = txObjectMotion.Load(int3(pos.xy, 0));
+        if (own.z > 0.5)
+            o.motion = own.xy;
+    }
     return o;
 }

@@ -158,7 +158,8 @@ struct Reprojection {
     Mat viewInv, viewProj, prevViewProj;
     float proj[4];
     float screen[2];
-    float pad[2];
+    float objectMotion; // 1: RenderHook's object motion vectors are bound (t1)
+    float pad;
 };
 
 ID3D11Device5* g_device;
@@ -362,9 +363,10 @@ bool CreateTextures(const D3D11_TEXTURE2D_DESC& src)
     return true;
 }
 
-void DrawMotionVectors(ID3D11ShaderResourceView* gbuffer1, ID3D11Buffer* rhState)
+void DrawMotionVectors(ID3D11ShaderResourceView* gbuffer1, ID3D11ShaderResourceView* objectMotion, ID3D11Buffer* rhState)
 {
     Reprojection r = {};
+    r.objectMotion = objectMotion ? 1.0f : 0.0f;
     Invert(g_cam.view, r.viewInv);
     r.viewProj = Mul(g_cam.view, g_cam.proj);
     r.prevViewProj = g_prevCam.valid ? Mul(g_prevCam.view, g_prevCam.proj) : r.viewProj;
@@ -391,10 +393,11 @@ void DrawMotionVectors(ID3D11ShaderResourceView* gbuffer1, ID3D11Buffer* rhState
     g_context->PSSetShader(g_ps, nullptr, 0);
     ID3D11Buffer* cbs[2] = { rhState, g_cb };
     g_context->PSSetConstantBuffers(0, 2, cbs);
-    g_context->PSSetShaderResources(0, 1, &gbuffer1);
+    ID3D11ShaderResourceView* srvs[2] = { gbuffer1, objectMotion };
+    g_context->PSSetShaderResources(0, 2, srvs);
     g_context->Draw(3, 0);
-    ID3D11ShaderResourceView* nullSrv = nullptr;
-    g_context->PSSetShaderResources(0, 1, &nullSrv);
+    ID3D11ShaderResourceView* nullSrvs[2] = {};
+    g_context->PSSetShaderResources(0, 2, nullSrvs);
     g_context->OMSetRenderTargets(0, nullptr, nullptr);
     g_context->SwapDeviceContextState(rhStateObj, nullptr);
     Release(rhStateObj);
@@ -409,8 +412,9 @@ bool CameraJumped()
     return dx * dx + dy * dy + dz * dz > g_resetDistance * g_resetDistance;
 }
 
-// true = output written. in/out/gb1 belong to the caller.
-bool RunDlaa(ID3D11DeviceContext* rhContext, ID3D11Texture2D* in, ID3D11Texture2D* out, ID3D11ShaderResourceView* gb1)
+// true = output written. in/out/gb1/objectMotion belong to the caller; objectMotion may be nullptr.
+bool RunDlaa(ID3D11DeviceContext* rhContext, ID3D11Texture2D* in, ID3D11Texture2D* out, ID3D11ShaderResourceView* gb1,
+             ID3D11ShaderResourceView* objectMotion)
 {
     if (!rhContext || !g_cam.valid) return false;
     if (!g_device && !InitDevice(rhContext)) return false;
@@ -437,7 +441,7 @@ bool RunDlaa(ID3D11DeviceContext* rhContext, ID3D11Texture2D* in, ID3D11Texture2
             ID3D11Buffer* rhState = nullptr;
             g_context->PSGetConstantBuffers(0, 1, &rhState);
             g_context->CopyResource(g_color, in);
-            DrawMotionVectors(gb1, rhState);
+            DrawMotionVectors(gb1, objectMotion, rhState);
             Release(rhState);
 
             LARGE_INTEGER now, freq;
@@ -472,7 +476,7 @@ bool RunDlaaOnRasters(void* input, void* output, void* gbuffer1)
 {
     ID3D11Texture2D* in = RasterTexture(input);
     ID3D11Texture2D* out = RasterTexture(output);
-    bool ok = in && out && RunDlaa(RhContext(), in, out, RasterSrv(gbuffer1));
+    bool ok = in && out && RunDlaa(RhContext(), in, out, RasterSrv(gbuffer1), nullptr);
     Release(in);
     Release(out);
     return ok;
@@ -517,7 +521,9 @@ void __cdecl TaaHook(void* input, void* output, void* gbuffer1, void* gbuffer2)
 // RenderHook with RHSetTemporalAAHandler: called in place of its TAA; false = RenderHook runs its own TAA
 bool __cdecl TemporalAAHandler(const RHTemporalAAFrame* frame)
 {
-    if (!frame || frame->size < sizeof(RHTemporalAAFrame)) return false;
+    // builds before object motion vectors pass a shorter frame
+    if (!frame || frame->size < offsetof(RHTemporalAAFrame, objectMotion)) return false;
+    ID3D11ShaderResourceView* objectMotion = frame->size >= sizeof(RHTemporalAAFrame) ? frame->objectMotion : nullptr;
     CheckToggleKey();
     memcpy(g_cam.view.m, frame->view, sizeof(Mat));
     memcpy(g_cam.proj.m, frame->projection, sizeof(Mat));
@@ -525,7 +531,7 @@ bool __cdecl TemporalAAHandler(const RHTemporalAAFrame* frame)
     g_cam.jitteredProj.m[8] += frame->jitterX;   // RenderHook adds the jitter to _31/_32
     g_cam.jitteredProj.m[9] += frame->jitterY;
     g_cam.valid = true;
-    bool done = g_enabled && g_active && !g_broken && RunDlaa(frame->context, frame->input, frame->output, frame->gbuffer1);
+    bool done = g_enabled && g_active && !g_broken && RunDlaa(frame->context, frame->input, frame->output, frame->gbuffer1, objectMotion);
     g_prevCam = g_cam;
     g_cam.valid = false;
     return done;
