@@ -508,10 +508,21 @@ void CheckToggleKey()
     }
 }
 
+// DLAA replaced RenderHook's TAA in the last frame (RHDLAAIsActive)
+bool g_dlaaLastFrame = false;
+
+// For other plugins (GetProcAddress): nonzero when DLAA replaced RenderHook's TAA in the last frame. RHWind uses it to
+// keep foliage out of the blended pass, whose mix with deferred-lit leaves DLAA shows as speckle.
+extern "C" __declspec(dllexport) int __cdecl RHDLAAIsActive()
+{
+    return g_dlaaLastFrame ? 1 : 0;
+}
+
 void __cdecl TaaHook(void* input, void* output, void* gbuffer1, void* gbuffer2)
 {
     CheckToggleKey();
     bool done = g_enabled && g_active && !g_broken && RunDlaaOnRasters(input, output, gbuffer1);
+    g_dlaaLastFrame = done;
     g_jitterActive = done;
     if (!done) CallTaa(input, output, gbuffer1, gbuffer2);
     g_prevCam = g_cam;
@@ -532,6 +543,7 @@ bool __cdecl TemporalAAHandler(const RHTemporalAAFrame* frame)
     g_cam.jitteredProj.m[9] += frame->jitterY;
     g_cam.valid = true;
     bool done = g_enabled && g_active && !g_broken && RunDlaa(frame->context, frame->input, frame->output, frame->gbuffer1, objectMotion);
+    g_dlaaLastFrame = done;
     g_prevCam = g_cam;
     g_cam.valid = false;
     return done;

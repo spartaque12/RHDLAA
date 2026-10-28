@@ -48,7 +48,7 @@ An ASI plugin that replaces [gtaRenderHook](https://github.com/petrgeorgievsky/g
 
 ## Known limitations
 
-- Motion vectors come from the camera only. Cars, peds and swaying trees have no motion of their own, the same as with RenderHook's TAA. DLAA handles that better than the TAA did, but fast cars can leave a faint trail.
+- Object motion needs a RenderHook with object motion vectors ([gtaRenderHook PR #53](https://github.com/petrgeorgievsky/gtaRenderHook/pull/53)). There cars, peds (limbs included) and other moving objects get their own motion, and RHDLAA 1.2+ uses it. With other builds, motion vectors come from the camera only, so fast cars can leave a faint trail. Swaying trees have no motion of their own either way.
 - Costs roughly 1–1.5 ms per frame at 1440p on an RTX 4070 Ti SUPER, plus about 0.2 ms for the handoff to the helper.
 
 ## How it works
@@ -58,9 +58,11 @@ GTA SA is a 32-bit game, and NVIDIA ships the DLSS runtime (NGX) for 64-bit only
 1. **Hook.** RHDLAA takes over RenderHook's TAA step, which works on the HDR image before tonemapping, where DLAA belongs:
    - With RenderHook's plugin API, it registers a handler with `RHSetTemporalAAHandler`. RenderHook calls it each frame with the context, the input and output textures, G-buffer 1, the jitter, and the view and unjittered projection matrices. If it returns false (F9, or DLAA not ready), RenderHook runs its own TAA.
    - On the 2021-09-11 release, the call to `CTemporalAA::Render` in `RenderTonemappedOutput` (at `+0xDBB32`) is redirected, and the matrices are read around `CTemporalAA::JitterProjMatrix`.
-2. **Inputs.** The HDR colour is copied into a texture shared with the helper (D3D11 shared NT handle). A fullscreen pass writes camera motion vectors and hardware-style depth into two more shared textures, reconstructed from the view depth in RenderHook's G-buffer and the current and previous camera matrices.
+2. **Inputs.** The HDR colour is copied into a texture shared with the helper (D3D11 shared NT handle). A fullscreen pass writes motion vectors and hardware-style depth into two more shared textures, reconstructed from the view depth in RenderHook's G-buffer and the current and previous camera matrices. Where RenderHook passes object motion (`RHTemporalAAFrame::objectMotion`, PR #53), pixels marked as moving use that instead of camera motion.
 3. **Sync.** The game signals a shared `ID3D11Fence` and wakes the helper. The helper makes its GPU wait for that fence, runs DLAA into a shared output texture and signals the fence again. The game's GPU waits for that and copies the result into RenderHook's output. The GPUs synchronise directly; the CPU waits only for the helper to *submit* its work.
 4. **Jitter.** In the 2021-09-11 release, `CTemporalAA::JitterProjMatrix` never advances its sample index (`x = (x++) % n` assigns the old value back), so its TAA never actually jittered. There RHDLAA advances the index before each call and measures the offset RenderHook applied. The bug is fixed upstream in [gtaRenderHook PR #31](https://github.com/petrgeorgievsky/gtaRenderHook/pull/31), and with the plugin API RenderHook passes the jitter directly.
+
+Other plugins can ask whether DLAA ran in the last frame through the export `int RHDLAAIsActive()` (nonzero = DLAA replaced RenderHook's TAA). [RHWind](https://github.com/spartaque12/RHWind) 1.6 uses it to draw foliage alpha-tested only while DLAA runs.
 
 The helper exits with the game: it watches the game process and sits in a kill-on-close job object. If it fails or stops answering, the plugin falls back to RenderHook's TAA for the rest of the session.
 
