@@ -604,7 +604,7 @@ BOOL WINAPI DllMain(HMODULE mod, DWORD reason, LPVOID)
         GetModuleFileNameA(mod, path, MAX_PATH);
         if (char* dot = strrchr(path, '.')) strcpy_s(dot, path + MAX_PATH - dot, ".log");
         g_log = _fsopen(path, "w", _SH_DENYNO);
-        Log("RHDLAA 1.1");
+        Log("RHDLAA 1.2");
         if (char* dot = strrchr(path, '.')) strcpy_s(dot, path + MAX_PATH - dot, ".ini");
         g_enabled = GetPrivateProfileIntA("DLAA", "Enabled", 1, path) != 0;
         g_preset = GetPrivateProfileIntA("DLAA", "Preset", 0, path);
