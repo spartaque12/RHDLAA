@@ -46,6 +46,22 @@ An ASI plugin that replaces [gtaRenderHook](https://github.com/petrgeorgievsky/g
 | `JitterSignX`, `JitterSignY` | 1 | Set to -1 if the image looks soft or wobbles slightly when standing still. 1 is correct on the tested setup. |
 | `ResetDistance` | 30 | A camera jump farther than this (metres in one frame), such as a cutscene cut, starts DLAA's history fresh. |
 
+## Frame generation (RTX 40 series and newer only)
+
+`framegen\` holds an experimental companion to RHDLAA: **NVIDIA DLSS Frame Generation** (one generated frame per rendered frame) for RenderHook, built on the same motion vectors and depth.
+
+> **Works only on GeForce RTX 40 series and newer.** NVIDIA allows DLSS Frame Generation on RTX 40/50 only. On RTX 20/30 and other cards Streamline reports it unsupported, and the helper just presents the frames without generating any (a little added latency, nothing gained): leave it off there.
+
+It needs a RenderHook build with the frame generation bridge, from [spartaque12/gtaRenderHook, branch `feature/framegen-bridge`](https://github.com/spartaque12/gtaRenderHook/tree/feature/framegen-bridge) (not upstream). That build also adds a HUD layer (the HUD is kept out of the interpolation), NVIDIA Reflex, object motion vectors and the shader cache.
+
+**How it works.** Frame generation needs D3D12 and a 64-bit process; RenderHook is D3D11 and 32-bit. So RenderHook hands every finished frame, its depth, motion vectors, camera, the frame without HUD and the HUD layer to `RHFrameGen64.exe` through shared textures and fences. The helper presents it with [NVIDIA Streamline](https://github.com/NVIDIA-RTX/Streamline) (DLSS-G, Reflex) in a borderless, click-through window over the game's client area. The game keeps focus and input. The frame is handed over from inside DXGI's `Present`, so overlays that draw there (CheatMenu, ...) are included.
+
+**Install.** Build it (below) and copy `framegen\bin\RHFrameGen\` next to `_gtaRenderHook.asi` as `RHFrameGen\`. In `settings.xml`, in the `<Debug ... />` line: `FrameGenBridge="true"`, and for the HUD to stay sharp `HudLayer="true"`; `NvReflex="true"` adds Reflex on the game's side.
+
+**In game.** F11 switches frame generation on and off, F5 hides the helper's window to compare with the game's own output. Both keys are set in `RHFrameGen\RHFrameGen64.ini` (F1..F24, a virtual-key code, or `none`). Logs: `RHFrameGen\RHFrameGen64.log`, `RHFrameGen\sl.log`, `RHFrameGen\RHFrameGenBridge.log`. If the helper fails, the game carries on with RenderHook's own output.
+
+**Measured** (RTX 4070 Ti SUPER, 1440p, CPU-bound at ~68 fps): ~130–145 fps on screen. Game frame start to screen: 22.9 ms without the bridge, 23.3 ms with the bridge and frame generation off, ~36 ms (median) with frame generation on, about one frame more, as with any frame interpolation.
+
 ## Known limitations
 
 - Object motion needs a RenderHook with object motion vectors ([gtaRenderHook PR #53](https://github.com/petrgeorgievsky/gtaRenderHook/pull/53)). There cars, peds (limbs included) and other moving objects get their own motion, and RHDLAA 1.2+ uses it. With other builds, motion vectors come from the camera only, so fast cars can leave a faint trail. Swaying trees have no motion of their own either way.
@@ -78,4 +94,6 @@ Visual Studio 2019/2022 or Build Tools with the C++ x86 and x64 compilers, and t
 
 `test\HelperTest.cpp` is a 32-bit test that shares textures the way the plugin does, runs a few DLAA frames through the helper and reads the result back.
 
-The DLSS SDK and `nvngx_dlss.dll` are © NVIDIA, under the NVIDIA RTX SDKs license.
+Frame generation helper: from [NVIDIA Streamline](https://github.com/NVIDIA-RTX/Streamline) 2.x (tested with 2.14.16), copy `include\`, `lib\x64\sl.interposer.lib` and from `bin\x64\` `sl.interposer.dll`, `sl.common.dll`, `sl.dlss_g.dll`, `sl.reflex.dll`, `sl.pcl.dll`, `nvngx_dlssg.dll` into `framegen\third_party\streamline\` (same layout), then run `framegen\build.bat`. The output goes to `framegen\bin\RHFrameGen\`. `framegen\src\FrameGenShared.h` is the protocol shared with RenderHook and must match the copy in the RenderHook build.
+
+The DLSS SDK, Streamline and `nvngx_dlss.dll` / `nvngx_dlssg.dll` are © NVIDIA, under the NVIDIA RTX SDKs license.
